@@ -3,6 +3,27 @@ import mediapipe as mp
 import mido
 import time
 
+def is_fist(hand_landmarks):
+    # Landmarks: 0: Wrist
+    # Fingers indices: (Tip, PIP)
+    # Index: (8, 6), Middle: (12, 10), Ring: (16, 14), Pinky: (20, 18)
+    wrist = hand_landmarks.landmark[0]
+    fingers_indices = [(8, 6), (12, 10), (16, 14), (20, 18)]
+    
+    folded_count = 0
+    for tip_idx, pip_idx in fingers_indices:
+        tip = hand_landmarks.landmark[tip_idx]
+        pip = hand_landmarks.landmark[pip_idx]
+        
+        # Calculate squared distance to wrist
+        d_tip = (tip.x - wrist.x)**2 + (tip.y - wrist.y)**2 + (tip.z - wrist.z)**2
+        d_pip = (pip.x - wrist.x)**2 + (pip.y - wrist.y)**2 + (pip.z - wrist.z)**2
+        
+        if d_tip < d_pip:
+            folded_count += 1
+            
+    return folded_count >= 3
+
 def main():
     # --- Configuration ---
     # MIDI Settings
@@ -82,14 +103,25 @@ def main():
     # Crucial: Minimize latency
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-    print("Hand Fader started. Press 'q' to exit.")
+    print("Hand Fader started. Press 'q' or click the close button to exit.")
 
     # State for EMA
     smooth_x = 0.5
     smooth_y = 0.5
+    
+    # State for Lock
+    locked = False
 
     try:
         while True:
+            # Check for window close (X button) or 'q' key immediately to catch exit requests
+            # Note: We need to do this after imshow usually, but checking here is safe too
+            if cv2.getWindowProperty('Hand Fader', cv2.WND_PROP_VISIBLE) < 1:
+                # This breaks if the window isn't created yet, but that's handled by imshow creating it first time
+                # However, getWindowProperty returns -1 if window doesn't exist.
+                # Let's assume the loop runs at least once to create window.
+                pass 
+
             success, frame = cap.read()
             if not success:
                 print("Ignoring empty camera frame.")
@@ -105,16 +137,20 @@ def main():
             
             if results.multi_hand_landmarks:
                 for hand_landmarks in results.multi_hand_landmarks:
-                    # Track Landmark 9 (Middle Finger MCP)
-                    # Coordinates are normalized [0.0, 1.0]
-                    lm = hand_landmarks.landmark[9]
-                    raw_x = lm.x
-                    raw_y = lm.y
+                    # Check if hand is a fist (locked)
+                    locked = is_fist(hand_landmarks)
                     
-                    # Apply EMA Smoothing
-                    # New = Alpha * Raw + (1 - Alpha) * Old
-                    smooth_x = EMA_ALPHA * raw_x + (1 - EMA_ALPHA) * smooth_x
-                    smooth_y = EMA_ALPHA * raw_y + (1 - EMA_ALPHA) * smooth_y
+                    if not locked:
+                        # Track Landmark 9 (Middle Finger MCP)
+                        # Coordinates are normalized [0.0, 1.0]
+                        lm = hand_landmarks.landmark[9]
+                        raw_x = lm.x
+                        raw_y = lm.y
+                        
+                        # Apply EMA Smoothing
+                        # New = Alpha * Raw + (1 - Alpha) * Old
+                        smooth_x = EMA_ALPHA * raw_x + (1 - EMA_ALPHA) * smooth_x
+                        smooth_y = EMA_ALPHA * raw_y + (1 - EMA_ALPHA) * smooth_y
                     
                     # Clamp values 0.0-1.0 just in case
                     val_x = max(0.0, min(1.0, smooth_x))
@@ -135,17 +171,24 @@ def main():
                     midi_port.send(msg_mod)
                     midi_port.send(msg_breath)
                     
-                    # Visual feedback (optional but helpful)
+                    # Visual feedback
                     h, w, _ = frame.shape
                     cx, cy = int(smooth_x * w), int(smooth_y * h)
-                    cv2.circle(frame, (cx, cy), 10, (0, 255, 0), -1)
-                    cv2.putText(frame, f"Mod: {midi_val_y} Breath: {midi_val_x}", (10, 30), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    
+                    # Color: Green if tracking, Red if locked
+                    color = (0, 0, 255) if locked else (0, 255, 0)
+                    
+                    cv2.circle(frame, (cx, cy), 10, color, -1)
+                    
+                    status_text = "LOCKED" if locked else "TRACKING"
+                    cv2.putText(frame, f"Mod: {midi_val_y} Breath: {midi_val_x} [{status_text}]", (10, 30), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
 
             # Display
             cv2.imshow('Hand Fader', frame)
             
-            if cv2.waitKey(5) & 0xFF == ord('q'):
+            key = cv2.waitKey(5) & 0xFF
+            if key == ord('q') or cv2.getWindowProperty('Hand Fader', cv2.WND_PROP_VISIBLE) < 1:
                 break
                 
     except KeyboardInterrupt:
