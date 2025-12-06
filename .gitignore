@@ -3,3 +3,6 @@ dist/
 build/
 *.spec
 __pycache__/
+
+test_cam.py
+run.bat
